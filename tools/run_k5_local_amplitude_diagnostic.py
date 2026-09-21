@@ -238,7 +238,6 @@ def main():
         )
 
     yy, xx = np.mgrid[:common.height, :common.width]
-    all_coords = np.column_stack((yy.ravel(), xx.ravel()))
     ncols = int(np.ceil(common.width / args.block_size))
     block_map = (yy // args.block_size) * ncols + xx // args.block_size
 
@@ -256,12 +255,10 @@ def main():
         np.finfo(float).tiny,
     )
 
-    # Global baseline.
     global_fold_reports = []
     global_residuals = []
     global_ratios = []
 
-    # Local candidates.
     candidate_acc = {
         k: {
             "folds": [],
@@ -358,12 +355,13 @@ def main():
         ),
     }
 
-    # Full-support wire extrapolation diagnostic.
     full_coords = np.column_stack(np.nonzero(positive)).astype(np.float64)
     full_values = target[positive]
     wire_coords = np.column_stack(np.nonzero(wire)).astype(np.float64)
 
     candidates = {}
+    wire_predictions = {}
+
     for k, acc in candidate_acc.items():
         predictions = np.asarray(acc["predictions"], dtype=np.float64)
         targets = np.asarray(acc["targets"], dtype=np.float64)
@@ -377,6 +375,10 @@ def main():
             full_values,
             wire_coords,
             k=k,
+        )
+        wire_predictions[int(k)] = np.asarray(
+            wire_pred.values,
+            dtype=np.float64,
         )
 
         global_median_resid = global_report[
@@ -421,22 +423,6 @@ def main():
             },
         }
 
-        np.save(
-            output.parent / f".tmp_k5_b5_wire_k{k}.npy",
-            wire_pred.values,
-        )
-
-    output.mkdir(parents=True, exist_ok=False)
-
-    # Move temporary arrays into output only after successful diagnostic.
-    for k in args.k_values:
-        tmp = output.parent / f".tmp_k5_b5_wire_k{k}.npy"
-        if tmp.exists():
-            tmp.replace(output / f"wire_predicted_amplitude_k{k}.npy")
-
-    np.save(output / "positive_calibration_mask.npy", positive)
-    np.save(output / "energy_excess_target.npy", target)
-
     summary = {
         "purpose": "K5-B.5 cross-fitted local SHARP amplitude diagnostic",
         "metric_target": "positive SHARP energy-excess magnitude",
@@ -475,6 +461,18 @@ def main():
             "No depth correction is integrated or composed.",
         ],
     }
+
+    # Create output only after every diagnostic calculation has succeeded.
+    output.mkdir(parents=True, exist_ok=False)
+
+    np.save(output / "positive_calibration_mask.npy", positive)
+    np.save(output / "energy_excess_target.npy", target)
+
+    for k, values in wire_predictions.items():
+        np.save(
+            output / f"wire_predicted_amplitude_k{k}.npy",
+            values,
+        )
 
     (output / "summary.json").write_text(
         json.dumps(summary, indent=2) + "\n"
