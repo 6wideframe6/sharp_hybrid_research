@@ -9,7 +9,12 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from k5.amplitude import fit_positive_vector_scale, vector_residuals
+from k5.amplitude import (
+    fit_positive_vector_scale,
+    fit_signed_vector_scale,
+    signed_vector_residuals,
+    vector_residuals,
+)
 
 
 class AmplitudeTests(unittest.TestCase):
@@ -33,35 +38,26 @@ class AmplitudeTests(unittest.TestCase):
             rtol=0,
         )
 
-    def test_robust_scale_with_vector_outliers(self):
-        rng = np.random.default_rng(3)
-        sx = rng.normal(size=4000)
-        sy = rng.normal(size=4000)
-        true_scale = 0.005
+    def test_signed_fit_recovers_negative_relation(self):
+        rng = np.random.default_rng(2)
+        sx = rng.normal(size=2000)
+        sy = rng.normal(size=2000)
+        scale = -0.0042
+        tx = scale * sx
+        ty = scale * sy
 
-        tx = true_scale * sx
-        ty = true_scale * sy
+        fit = fit_signed_vector_scale(sx, sy, tx, ty)
 
-        outliers = rng.choice(len(sx), 300, replace=False)
-        tx[outliers] += rng.normal(0, 0.08, len(outliers))
-        ty[outliers] += rng.normal(0, 0.08, len(outliers))
+        self.assertAlmostEqual(fit.scale, scale, places=14)
+        self.assertAlmostEqual(fit.positive_projection_fraction, 0.0)
+        np.testing.assert_allclose(
+            signed_vector_residuals(sx, sy, tx, ty, fit.scale),
+            0.0,
+            atol=1e-14,
+            rtol=0,
+        )
 
-        fit = fit_positive_vector_scale(sx, sy, tx, ty)
-
-        self.assertAlmostEqual(fit.scale, true_scale, delta=2e-4)
-
-    def test_positive_projection_fraction_detects_opposite_vectors(self):
-        sx = np.ones(100)
-        sy = np.zeros(100)
-        tx = np.ones(100)
-        ty = np.zeros(100)
-        tx[:25] = -1.0
-
-        fit = fit_positive_vector_scale(sx, sy, tx, ty)
-
-        self.assertAlmostEqual(fit.positive_projection_fraction, 0.75)
-
-    def test_negative_relation_is_rejected(self):
+    def test_positive_fit_still_rejects_negative_relation(self):
         sx = np.ones(100)
         sy = np.zeros(100)
         tx = -2 * sx
@@ -70,6 +66,22 @@ class AmplitudeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Non-positive"):
             fit_positive_vector_scale(sx, sy, tx, ty)
 
+    def test_signed_fit_robust_with_outliers(self):
+        rng = np.random.default_rng(3)
+        sx = rng.normal(size=4000)
+        sy = rng.normal(size=4000)
+        true_scale = -0.005
+
+        tx = true_scale * sx
+        ty = true_scale * sy
+
+        outliers = rng.choice(len(sx), 300, replace=False)
+        tx[outliers] += rng.normal(0, 0.08, len(outliers))
+        ty[outliers] += rng.normal(0, 0.08, len(outliers))
+
+        fit = fit_signed_vector_scale(sx, sy, tx, ty)
+        self.assertAlmostEqual(fit.scale, true_scale, delta=2e-4)
+
     def test_weights_shape_checked(self):
         sx = np.ones((4, 5))
         sy = np.ones((4, 5))
@@ -77,8 +89,11 @@ class AmplitudeTests(unittest.TestCase):
         ty = sy.copy()
 
         with self.assertRaisesRegex(ValueError, "weights"):
-            fit_positive_vector_scale(
-                sx, sy, tx, ty,
+            fit_signed_vector_scale(
+                sx,
+                sy,
+                tx,
+                ty,
                 weights=np.ones(7),
             )
 

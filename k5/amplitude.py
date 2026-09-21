@@ -1,10 +1,10 @@
 """K5-B metric-amplitude diagnostics.
 
 K5-A establishes context-consistent TinyViM detail direction/confidence.
-This module estimates only a *scalar diagnostic conversion* from a
-dimensionless K5 detail-vector template to SHARP inverse-depth gradient units.
 
-No depth correction is integrated here.
+This module provides robust scalar fits between 2-D vector fields for
+diagnostics. Signed fits are allowed only for diagnosis of orientation/sign
+consistency. A negative signed fit is NOT an accepted metric amplitude.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import numpy as np
 
 @dataclass(frozen=True)
 class ScaleFit:
-    """Robust positive scalar fit for target ~= scale * source."""
+    """Robust scalar fit for target ~= scale * source."""
 
     scale: float
     iterations: int
@@ -24,24 +24,17 @@ class ScaleFit:
     positive_projection_fraction: float
 
 
-def fit_positive_vector_scale(
+def _fit_vector_scale(
     source_x: np.ndarray,
     source_y: np.ndarray,
     target_x: np.ndarray,
     target_y: np.ndarray,
     *,
-    weights: np.ndarray | None = None,
-    iterations: int = 12,
-    huber_k: float = 1.5,
+    weights: np.ndarray | None,
+    iterations: int,
+    huber_k: float,
+    require_positive: bool,
 ) -> ScaleFit:
-    """Fit a positive scalar between two 2-D vector fields.
-
-    Minimizes vector residuals without an intercept. A Huber-style IRLS update
-    limits the influence of mismatched/disconnected edges.
-
-    This is intended for K5-B diagnostics on trusted shared SHARP geometry.
-    It must not be interpreted as proof that TinyViM magnitude is metric.
-    """
     sx = np.asarray(source_x, dtype=np.float64).ravel()
     sy = np.asarray(source_y, dtype=np.float64).ravel()
     tx = np.asarray(target_x, dtype=np.float64).ravel()
@@ -67,7 +60,11 @@ def fit_positive_vector_scale(
         base_w = raw_w[finite]
         good_w = np.isfinite(base_w) & (base_w > 0)
         sx, sy, tx, ty, base_w = (
-            sx[good_w], sy[good_w], tx[good_w], ty[good_w], base_w[good_w]
+            sx[good_w],
+            sy[good_w],
+            tx[good_w],
+            ty[good_w],
+            base_w[good_w],
         )
 
     if len(sx) < 8:
@@ -94,7 +91,9 @@ def fit_positive_vector_scale(
             raise ValueError("Weighted source vector field is degenerate")
 
         candidate = float(np.sum(w * projection) / denom)
-        if not np.isfinite(candidate) or candidate <= 0:
+        if not np.isfinite(candidate):
+            raise ValueError(f"Non-finite diagnostic scale: {candidate}")
+        if require_positive and candidate <= 0:
             raise ValueError(f"Non-positive diagnostic scale: {candidate}")
 
         residual = np.hypot(
@@ -128,6 +127,57 @@ def fit_positive_vector_scale(
     )
 
 
+def fit_positive_vector_scale(
+    source_x: np.ndarray,
+    source_y: np.ndarray,
+    target_x: np.ndarray,
+    target_y: np.ndarray,
+    *,
+    weights: np.ndarray | None = None,
+    iterations: int = 12,
+    huber_k: float = 1.5,
+) -> ScaleFit:
+    """Fit a strictly positive scalar between two 2-D vector fields."""
+    return _fit_vector_scale(
+        source_x,
+        source_y,
+        target_x,
+        target_y,
+        weights=weights,
+        iterations=iterations,
+        huber_k=huber_k,
+        require_positive=True,
+    )
+
+
+def fit_signed_vector_scale(
+    source_x: np.ndarray,
+    source_y: np.ndarray,
+    target_x: np.ndarray,
+    target_y: np.ndarray,
+    *,
+    weights: np.ndarray | None = None,
+    iterations: int = 12,
+    huber_k: float = 1.5,
+) -> ScaleFit:
+    """Fit an unconstrained signed scalar for diagnostic use only.
+
+    Negative output means source and target vector fields are oppositely
+    oriented under the fitted support. It must not be promoted to a metric
+    amplitude without resolving the sign/orientation cause.
+    """
+    return _fit_vector_scale(
+        source_x,
+        source_y,
+        target_x,
+        target_y,
+        weights=weights,
+        iterations=iterations,
+        huber_k=huber_k,
+        require_positive=False,
+    )
+
+
 def vector_residuals(
     source_x: np.ndarray,
     source_y: np.ndarray,
@@ -135,9 +185,28 @@ def vector_residuals(
     target_y: np.ndarray,
     scale: float,
 ) -> np.ndarray:
-    """Euclidean vector residual for target - scale*source."""
+    """Euclidean residual for a positive metric scale."""
     if not np.isfinite(scale) or scale <= 0:
         raise ValueError("scale must be positive and finite")
+    return signed_vector_residuals(
+        source_x,
+        source_y,
+        target_x,
+        target_y,
+        scale,
+    )
+
+
+def signed_vector_residuals(
+    source_x: np.ndarray,
+    source_y: np.ndarray,
+    target_x: np.ndarray,
+    target_y: np.ndarray,
+    scale: float,
+) -> np.ndarray:
+    """Euclidean vector residual for any finite signed diagnostic scale."""
+    if not np.isfinite(scale):
+        raise ValueError("scale must be finite")
 
     sx = np.asarray(source_x, dtype=np.float64)
     sy = np.asarray(source_y, dtype=np.float64)

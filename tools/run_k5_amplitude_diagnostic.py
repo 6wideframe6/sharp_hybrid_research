@@ -1,32 +1,20 @@
 #!/usr/bin/env python3
-"""K5-B.1 diagnostic metric-amplitude calibration on shared SHARP geometry.
+"""K5-B.1 signed amplitude diagnostic on shared SHARP geometry.
 
-This script DOES NOT modify SHARP depth and DOES NOT integrate a correction.
+No depth is modified and no correction is integrated.
 
-It estimates whether one positive global scalar can map the K5-A.1
-dimensionless detail-vector template into SHARP inverse-depth gradient units
-on trusted non-wire shared geometry.
+This revision intentionally allows a SIGNED scalar during diagnosis. Negative
+fits are reported rather than crashing. A negative fit is NOT accepted as a
+metric amplitude; it means the current K5 vector template and the chosen SHARP
+detail target have opposite orientation on that support.
 
-IMPORTANT:
-K4 ``anchor_candidates`` are intentionally NOT used here. K4 anchor masks were
-constructed from smooth fitting interiors and explicitly excluded RGB/depth
-boundaries. Reusing them for K5-B would contradict the requirement that K5-B
-fit on shared high-frequency geometry.
+The report also compares K5 direction against:
+- SHARP band-pass detail gradient: grad(G_fine(q) - G_coarse(q))
+- SHARP fine gradient: grad(G_fine(q))
+- SHARP raw inverse-depth gradient: grad(q)
 
-Training support:
-- finite positive SHARP inverse depth in both overlapping contexts;
-- finite K5 direction/detail/confidence;
-- outside the known wire proxy + exclusion dilation;
-- image border excluded;
-- sufficiently strong K5 final confidence;
-- then retain the requested percentile of strongest SHARP high-frequency
-  gradient within that support.
-
-Validation:
-- spatial block cross-fit;
-- reports fold scale variation and vector residuals;
-- wire pixels are never used for fitting and are reported only as extrapolated
-  diagnostic amplitude.
+This separates "K5 direction is globally reversed" from "the band-pass target
+has a different local sign than the underlying SHARP gradient".
 """
 
 from __future__ import annotations
@@ -43,7 +31,7 @@ from scipy import ndimage as ndi
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from k5.amplitude import fit_positive_vector_scale, vector_residuals
+from k5.amplitude import fit_signed_vector_scale, signed_vector_residuals
 from k5.overlap import crop_to_native_box
 from k5.types import NativeBox
 
@@ -78,12 +66,25 @@ def map_wire_proxy(wire_crop, target_box):
     return out
 
 
-def sharp_detail_vector(q, fine_sigma, coarse_sigma):
+def gradient_fields(q, fine_sigma, coarse_sigma):
     fine = ndi.gaussian_filter(q, sigma=fine_sigma, mode="nearest")
     coarse = ndi.gaussian_filter(q, sigma=coarse_sigma, mode="nearest")
-    fy, fx = np.gradient(fine)
-    cy, cx = np.gradient(coarse)
-    return fx - cx, fy - cy
+
+    fine_y, fine_x = np.gradient(fine)
+    coarse_y, coarse_x = np.gradient(coarse)
+    raw_y, raw_x = np.gradient(q)
+
+    detail_x = fine_x - coarse_x
+    detail_y = fine_y - coarse_y
+
+    return {
+        "detail_x": detail_x,
+        "detail_y": detail_y,
+        "fine_x": fine_x,
+        "fine_y": fine_y,
+        "raw_x": raw_x,
+        "raw_y": raw_y,
+    }
 
 
 def stats(values):
@@ -106,7 +107,14 @@ def stats(values):
 def cosine_stats(sx, sy, tx, ty):
     sm = np.hypot(sx, sy)
     tm = np.hypot(tx, ty)
-    valid = (sm > 0) & (tm > 0)
+    valid = (
+        np.isfinite(sx)
+        & np.isfinite(sy)
+        & np.isfinite(tx)
+        & np.isfinite(ty)
+        & (sm > 0)
+        & (tm > 0)
+    )
     if not valid.any():
         return {"n": 0}
 
@@ -114,16 +122,29 @@ def cosine_stats(sx, sy, tx, ty):
         sm[valid] * tm[valid]
     )
     cos = np.clip(cos, -1, 1)
-    return {
-        **stats(cos),
+
+    result = stats(cos)
+    result.update({
+        "negative_fraction": float(np.mean(cos < 0)),
         "positive_fraction": float(np.mean(cos > 0)),
+        "lt_minus_0.5_fraction": float(np.mean(cos < -0.5)),
         "gt_0.5_fraction": float(np.mean(cos > 0.5)),
+        "lt_minus_0.9_fraction": float(np.mean(cos < -0.9)),
         "gt_0.9_fraction": float(np.mean(cos > 0.9)),
-    }
+    })
+    return result
 
 
 def count(mask):
     return int(np.count_nonzero(mask))
+
+
+def sign_name(value):
+    if value > 0:
+        return "positive"
+    if value < 0:
+        return "negative"
+    return "zero"
 
 
 def main():
@@ -198,7 +219,6 @@ def main():
         if value.shape != common.shape:
             raise ValueError(f"{name}: {value.shape} != {common.shape}")
 
-    # Dimensionless K5 template. TinyViM/K5 amplitude is NOT considered metric.
     source_x = detail * direction_x
     source_y = detail * direction_y
     source_mag = np.hypot(source_x, source_y)
@@ -221,11 +241,9 @@ def main():
     q_diff = np.abs(q_a - q_b)
     q = 0.5 * (q_a + q_b)
 
-    sharp_x, sharp_y = sharp_detail_vector(
-        q,
-        args.fine_sigma,
-        args.coarse_sigma,
-    )
+    g = gradient_fields(q, args.fine_sigma, args.coarse_sigma)
+    sharp_x = g["detail_x"]
+    sharp_y = g["detail_y"]
     sharp_mag = np.hypot(sharp_x, sharp_y)
 
     finite_k5 = (
@@ -241,12 +259,11 @@ def main():
     )
 
     wire = map_wire_proxy(wire_crop, common)
-    if args.wire_exclusion_px > 0:
-        wire_excluded = ndi.binary_dilation(
-            wire, iterations=args.wire_exclusion_px
-        )
-    else:
-        wire_excluded = wire.copy()
+    wire_excluded = (
+        ndi.binary_dilation(wire, iterations=args.wire_exclusion_px)
+        if args.wire_exclusion_px > 0
+        else wire.copy()
+    )
 
     border = np.ones(common.shape, dtype=bool)
     b = args.border_px
@@ -256,7 +273,6 @@ def main():
         border[:, :b] = False
         border[:, -b:] = False
 
-    # Build support cumulatively and keep every stage visible in diagnostics.
     support0 = finite_q
     support1 = support0 & finite_sharp_detail
     support2 = support1 & finite_k5
@@ -274,33 +290,56 @@ def main():
         "plus_min_k5_confidence": count(base),
     }
 
-    print("K5-B.1 support stages:")
+    print("K5-B.1 signed diagnostic support stages:")
     for key, value in support_stages.items():
         print(f"  {key}: {value}")
 
     if count(base) < 100:
         raise RuntimeError(
-            "Insufficient base shared-detail support after corrected K5-B filters: "
-            f"{count(base)} pixels. See support stages above."
+            f"Insufficient base support: {count(base)}. See stages above."
         )
 
     sharp_threshold = float(
-        np.percentile(
-            sharp_mag[base],
-            args.sharp_detail_percentile,
-        )
+        np.percentile(sharp_mag[base], args.sharp_detail_percentile)
     )
     selected = base & (sharp_mag >= sharp_threshold)
+    support_stages["selected_after_sharp_detail_percentile"] = count(selected)
 
     print(
-        f"  plus_sharp_detail_percentile_{args.sharp_detail_percentile:g}: "
-        f"{count(selected)}"
+        f"  selected_after_sharp_detail_percentile_"
+        f"{args.sharp_detail_percentile:g}: {count(selected)}"
     )
 
     if count(selected) < 100:
-        raise RuntimeError(
-            f"Only {count(selected)} selected SHARP-detail pixels after "
-            f"percentile {args.sharp_detail_percentile:g}"
+        raise RuntimeError(f"Only {count(selected)} selected pixels")
+
+    selected_orientation = {
+        "k5_vs_sharp_bandpass_detail": cosine_stats(
+            source_x[selected],
+            source_y[selected],
+            sharp_x[selected],
+            sharp_y[selected],
+        ),
+        "k5_vs_sharp_fine_gradient": cosine_stats(
+            source_x[selected],
+            source_y[selected],
+            g["fine_x"][selected],
+            g["fine_y"][selected],
+        ),
+        "k5_vs_sharp_raw_gradient": cosine_stats(
+            source_x[selected],
+            source_y[selected],
+            g["raw_x"][selected],
+            g["raw_y"][selected],
+        ),
+    }
+
+    print("selected orientation:")
+    for name, value in selected_orientation.items():
+        print(
+            f"  {name}: median={value.get('median')} "
+            f"positive_fraction={value.get('positive_fraction')} "
+            f"negative_fraction={value.get('negative_fraction')}"
         )
 
     yy, xx = np.mgrid[:common.height, :common.width]
@@ -344,14 +383,15 @@ def main():
             })
             continue
 
-        fit = fit_positive_vector_scale(
+        fit = fit_signed_vector_scale(
             source_x[train],
             source_y[train],
             sharp_x[train],
             sharp_y[train],
             weights=confidence[train],
         )
-        residual = vector_residuals(
+
+        residual = signed_vector_residuals(
             source_x[val],
             source_y[val],
             sharp_x[val],
@@ -360,17 +400,16 @@ def main():
         )
         normalized = residual / target_scale
 
-        fold_scales.append(fit.scale)
+        fold_scales.append(float(fit.scale))
         pooled_residuals.extend(normalized.tolist())
 
-        pred_mag = (
-            fit.scale
-            * np.hypot(source_x[val], source_y[val])
+        predicted_mag = abs(fit.scale) * np.hypot(
+            source_x[val], source_y[val]
         )
         target_mag = sharp_mag[val]
         ratio_mask = target_mag > np.finfo(float).tiny
         magnitude_ratio = (
-            pred_mag[ratio_mask] / target_mag[ratio_mask]
+            predicted_mag[ratio_mask] / target_mag[ratio_mask]
         )
 
         folds.append({
@@ -378,14 +417,18 @@ def main():
             "usable": True,
             "training_samples": count(train),
             "validation_samples": count(val),
-            "scale": float(fit.scale),
+            "signed_scale": float(fit.scale),
+            "scale_sign": sign_name(fit.scale),
+            "metric_amplitude_accepted": bool(fit.scale > 0),
             "fit_iterations": int(fit.iterations),
             "positive_projection_fraction_train": (
                 fit.positive_projection_fraction
             ),
-            "normalized_vector_residual": stats(normalized),
-            "magnitude_ratio_predicted_over_sharp": stats(
-                magnitude_ratio
+            "training_direction_cosine": cosine_stats(
+                source_x[train],
+                source_y[train],
+                sharp_x[train],
+                sharp_y[train],
             ),
             "validation_direction_cosine": cosine_stats(
                 source_x[val],
@@ -393,23 +436,31 @@ def main():
                 sharp_x[val],
                 sharp_y[val],
             ),
+            "normalized_vector_residual": stats(normalized),
+            "absolute_scale_magnitude_ratio_predicted_over_sharp": stats(
+                magnitude_ratio
+            ),
         })
 
     if not fold_scales:
         raise RuntimeError("No usable cross-validation folds")
 
-    if len(fold_scales) >= 2:
-        scale_variation = float(
-            np.ptp(fold_scales)
-            / max(
-                float(np.median(fold_scales)),
-                np.finfo(float).tiny,
-            )
-        )
-    else:
-        scale_variation = None
+    fold_scales_array = np.asarray(fold_scales, dtype=np.float64)
+    signs = np.sign(fold_scales_array)
+    nonzero_signs = signs[signs != 0]
+    all_same_nonzero_sign = bool(
+        len(nonzero_signs)
+        and np.all(nonzero_signs == nonzero_signs[0])
+    )
 
-    full_fit = fit_positive_vector_scale(
+    abs_median = float(np.median(np.abs(fold_scales_array)))
+    signed_scale_relative_spread = (
+        None
+        if abs_median <= np.finfo(float).tiny
+        else float(np.ptp(fold_scales_array) / abs_median)
+    )
+
+    full_fit = fit_signed_vector_scale(
         source_x[selected],
         source_y[selected],
         sharp_x[selected],
@@ -417,19 +468,25 @@ def main():
         weights=confidence[selected],
     )
 
-    wire_valid = (
-        wire
-        & finite_k5
-    )
-    wire_template_mag = np.hypot(
-        source_x[wire_valid],
-        source_y[wire_valid],
-    )
-    wire_predicted_metric_mag = (
-        full_fit.scale * wire_template_mag
+    positive_folds = int(np.sum(fold_scales_array > 0))
+    negative_folds = int(np.sum(fold_scales_array < 0))
+
+    metric_candidate_accepted = bool(
+        full_fit.scale > 0
+        and negative_folds == 0
+        and positive_folds == len(fold_scales_array)
     )
 
-    trusted_sharp_mag = sharp_mag[selected]
+    wire_valid = wire & finite_k5
+    wire_template_mag = np.hypot(
+        source_x[wire_valid], source_y[wire_valid]
+    )
+
+    wire_metric_magnitude = (
+        stats(full_fit.scale * wire_template_mag)
+        if metric_candidate_accepted
+        else None
+    )
 
     output.mkdir(parents=True, exist_ok=False)
     np.save(output / "base_support_mask.npy", base)
@@ -437,10 +494,11 @@ def main():
     np.save(output / "sharp_detail_magnitude.npy", sharp_mag)
 
     summary = {
-        "purpose": "K5-B.1 diagnostic global metric amplitude scale only",
-        "support_design_revision": (
-            "K4 anchor candidates removed: they intentionally exclude depth/RGB "
-            "boundaries and are incompatible with high-frequency amplitude fitting."
+        "purpose": "K5-B.1 signed diagnostic scalar/orientation test",
+        "metric_amplitude_candidate_accepted": metric_candidate_accepted,
+        "acceptance_rule": (
+            "full signed fit must be positive and every usable spatial fold "
+            "must also have positive signed scale"
         ),
         "context_a": str(context_a),
         "context_b": str(context_b),
@@ -462,7 +520,6 @@ def main():
         },
         "support_stages": {
             **support_stages,
-            "selected_after_sharp_detail_percentile": count(selected),
             "spatial_blocks": int(len(blocks)),
             "wire_pixels": count(wire),
             "wire_excluded_pixels": count(wire_excluded),
@@ -471,50 +528,44 @@ def main():
             "finite_pixels": count(finite_q),
             "abs_difference_1_per_m": stats(q_diff[finite_q]),
         },
-        "k5_template_on_base": {
-            "magnitude": stats(source_mag[base]),
-            "confidence": stats(confidence[base]),
-        },
+        "selected_orientation": selected_orientation,
         "crossfit": {
             "folds": folds,
-            "fold_scales_1_per_m_per_template_unit": [
-                float(v) for v in fold_scales
-            ],
-            "scale_variation": scale_variation,
+            "signed_fold_scales": [float(v) for v in fold_scales],
+            "positive_folds": positive_folds,
+            "negative_folds": negative_folds,
+            "all_same_nonzero_sign": all_same_nonzero_sign,
+            "signed_scale_relative_spread": signed_scale_relative_spread,
             "pooled_normalized_vector_residual": stats(
                 np.asarray(pooled_residuals)
             ),
-            "normalization_sharp_detail_p90_1_per_m_per_px": (
-                target_scale
-            ),
+            "normalization_sharp_detail_p90_1_per_m_per_px": target_scale,
         },
-        "full_fit": {
-            "scale_1_per_m_per_template_unit": float(full_fit.scale),
+        "full_signed_fit": {
+            "signed_scale": float(full_fit.scale),
+            "scale_sign": sign_name(full_fit.scale),
             "iterations": int(full_fit.iterations),
             "samples": int(full_fit.samples),
             "positive_projection_fraction": (
                 full_fit.positive_projection_fraction
             ),
         },
-        "trusted_sharp_detail_magnitude_1_per_m_per_px": stats(
-            trusted_sharp_mag
-        ),
         "wire_diagnostic_only": {
             "wire_template_magnitude": stats(wire_template_mag),
-            "predicted_metric_gradient_magnitude_1_per_m_per_px": stats(
-                wire_predicted_metric_mag
+            "accepted_predicted_metric_gradient_magnitude_1_per_m_per_px": (
+                wire_metric_magnitude
             ),
             "warning": (
-                "Wire values are extrapolated diagnostic amplitudes only. "
-                "They are not integrated and do not establish true wire depth."
+                "Wire amplitude remains unset when the signed scale is not "
+                "consistently positive across folds."
             ),
         },
         "guardrails": [
-            "K4 anchor masks are not used in K5-B amplitude fitting.",
-            "Wire pixels are excluded from amplitude fitting.",
+            "Negative signed fits are diagnostic failures, not amplitudes.",
+            "No automatic direction flip is performed.",
+            "Wire pixels are excluded from fitting.",
             "No depth correction is integrated.",
             "No SHARP depth/Gaussians/PLY are modified.",
-            "A stable scalar on shared edges is necessary but not sufficient for K5-B.",
         ],
     }
 
@@ -522,7 +573,7 @@ def main():
         json.dumps(summary, indent=2) + "\n"
     )
 
-    print("K5-B.1 amplitude diagnostic complete")
+    print("K5-B.1 signed amplitude diagnostic complete")
     print(json.dumps(summary, indent=2))
 
 
