@@ -41,6 +41,32 @@ def extract_native_overlap(
     )
 
 
+def native_halo_support_mask(
+    source_box: NativeBox,
+    target_box: NativeBox,
+    *,
+    halo_px: int,
+) -> np.ndarray:
+    """Mask target pixels whose raw-data footprint stays inside source_box.
+
+    ``halo_px`` is measured in native pixels. A target pixel is valid only if
+    at least ``halo_px`` source pixels exist on all four sides before reaching
+    the source-context boundary.
+    """
+    if halo_px < 0:
+        raise ValueError("halo_px must be non-negative")
+    if not source_box.contains(target_box):
+        raise ValueError("target_box must be contained in source_box")
+
+    yy, xx = np.mgrid[target_box.y0:target_box.y1, target_box.x0:target_box.x1]
+    return (
+        (xx >= source_box.x0 + halo_px)
+        & (xx < source_box.x1 - halo_px)
+        & (yy >= source_box.y0 + halo_px)
+        & (yy < source_box.y1 - halo_px)
+    )
+
+
 def map_mask_to_box(
     mask: np.ndarray,
     mask_box: NativeBox,

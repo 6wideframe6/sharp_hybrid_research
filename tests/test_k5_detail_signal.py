@@ -10,7 +10,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from k5.detail_signal import extract_gradient_field
-from k5.overlap import extract_native_overlap, map_mask_to_box
+from k5.overlap import (
+    extract_native_overlap,
+    map_mask_to_box,
+    native_halo_support_mask,
+)
 from k5.types import NativeBox
 
 
@@ -69,11 +73,25 @@ class DetailSignalTests(unittest.TestCase):
         np.testing.assert_array_equal(av, a[0:4, 3:6])
         np.testing.assert_array_equal(bv, b[2:6, 0:3])
 
+    def test_halo_support_uses_source_context_boundary(self):
+        source = NativeBox(100, 200, 120, 220)
+        target = NativeBox(105, 203, 115, 217)
+        mask = native_halo_support_mask(
+            source, target, halo_px=5
+        )
+
+        self.assertEqual(mask.shape, target.shape)
+        # Top two target rows are too close to source y0=200 for halo=5.
+        self.assertFalse(mask[0].any())
+        self.assertFalse(mask[1].any())
+        # Native y=205 and x in [105,114] are safe.
+        self.assertTrue(mask[2].all())
+
     def test_mask_mapping_uses_half_open_native_coordinates(self):
         source_box = NativeBox(10, 20, 14, 23)
         target_box = NativeBox(12, 18, 17, 24)
         mask = np.zeros(source_box.shape, dtype=bool)
-        mask[1, 2] = True  # native (12, 21)
+        mask[1, 2] = True
 
         mapped = map_mask_to_box(mask, source_box, target_box)
 

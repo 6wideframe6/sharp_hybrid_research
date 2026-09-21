@@ -57,11 +57,17 @@ def robust_normalize_detail(
     *,
     low_percentile: float = 50.0,
     high_percentile: float = 99.0,
+    valid_mask: np.ndarray | None = None,
 ) -> np.ndarray:
     """Normalize one context's detector to [0, 1] using robust percentiles.
 
     Normalization is context-local. Therefore different TinyViM raw scales do
     not directly determine final confidence amplitude.
+
+    If ``valid_mask`` is provided, percentile statistics are computed only from
+    that mask and output outside the mask is forced to zero. This is used by
+    K5-A.1b to exclude pixels whose Gaussian/gradient footprint touches a
+    source-context boundary.
 
     Values <= low percentile map to zero. Values >= high percentile map to one.
     Degenerate/constant inputs return zeros.
@@ -74,7 +80,18 @@ def robust_normalize_detail(
     if not 0.0 <= low_percentile < high_percentile <= 100.0:
         raise ValueError("Require 0 <= low_percentile < high_percentile <= 100")
 
-    lo, hi = np.percentile(value, [low_percentile, high_percentile])
+    if valid_mask is None:
+        mask = np.ones(value.shape, dtype=bool)
+    else:
+        mask = np.asarray(valid_mask, dtype=bool)
+        if mask.shape != value.shape:
+            raise ValueError("valid_mask must match strength shape")
+
+    samples = value[mask]
+    if not samples.size:
+        return np.zeros_like(value, dtype=np.float64)
+
+    lo, hi = np.percentile(samples, [low_percentile, high_percentile])
     span = float(hi - lo)
 
     scale = max(1.0, abs(float(lo)), abs(float(hi)))
@@ -82,8 +99,8 @@ def robust_normalize_detail(
     if span <= floor:
         return np.zeros_like(value, dtype=np.float64)
 
-    normalized = (value - lo) / span
-    return np.clip(normalized, 0.0, 1.0)
+    normalized = np.clip((value - lo) / span, 0.0, 1.0)
+    return np.where(mask, normalized, 0.0)
 
 
 def detail_consensus_min(

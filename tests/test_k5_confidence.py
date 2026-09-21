@@ -28,8 +28,6 @@ class ConfidenceTests(unittest.TestCase):
             coarse_sigma_px=4.0,
         )
 
-        # Ignore Gaussian boundary effects. A true plane carries no
-        # high-frequency detail in the interior.
         interior = detail[16:-16, 16:-16]
         plane_gradient = float(np.hypot(0.01, 0.02))
         self.assertLess(
@@ -62,8 +60,26 @@ class ConfidenceTests(unittest.TestCase):
         strength = np.exp(-((x - 50) ** 2 + (y - 40) ** 2) / 180.0)
         a = robust_normalize_detail(strength)
         b = robust_normalize_detail(17.0 * strength)
-
         np.testing.assert_allclose(a, b, atol=1e-14, rtol=0)
+
+    def test_masked_normalization_ignores_boundary_outlier_and_zeros_outside(self):
+        strength = np.zeros((20, 30), dtype=np.float64)
+        strength[5:15, 8:22] = np.linspace(0, 1, 140).reshape(10, 14)
+        strength[0, :] = 1000.0
+
+        mask = np.zeros_like(strength, dtype=bool)
+        mask[5:15, 8:22] = True
+
+        result = robust_normalize_detail(
+            strength,
+            low_percentile=0,
+            high_percentile=100,
+            valid_mask=mask,
+        )
+
+        self.assertTrue((result[~mask] == 0).all())
+        self.assertAlmostEqual(float(result[5, 8]), 0.0)
+        self.assertAlmostEqual(float(result[14, 21]), 1.0)
 
     def test_degenerate_normalization_returns_zero(self):
         result = robust_normalize_detail(np.full((20, 30), 7.0))
