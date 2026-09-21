@@ -1,4 +1,4 @@
-"""Checkpoint-independent tests for K5-B amplitude diagnostics."""
+"""Tests for K5-B amplitude scalar/vector diagnostics."""
 
 from pathlib import Path
 import sys
@@ -10,92 +10,53 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from k5.amplitude import (
+    fit_positive_scalar_scale,
     fit_positive_vector_scale,
     fit_signed_vector_scale,
-    signed_vector_residuals,
-    vector_residuals,
+    scalar_residuals,
 )
 
 
 class AmplitudeTests(unittest.TestCase):
-    def test_exact_positive_scale_recovery(self):
-        rng = np.random.default_rng(11)
-        sx = rng.normal(size=(40, 50))
-        sy = rng.normal(size=(40, 50))
-        scale = 0.0037
-        tx = scale * sx
-        ty = scale * sy
+    def test_exact_positive_vector_scale(self):
+        rng = np.random.default_rng(1)
+        sx = rng.normal(size=1000)
+        sy = rng.normal(size=1000)
+        fit = fit_positive_vector_scale(sx, sy, 0.004*sx, 0.004*sy)
+        self.assertAlmostEqual(fit.scale, 0.004, places=14)
 
-        fit = fit_positive_vector_scale(sx, sy, tx, ty)
-
-        self.assertAlmostEqual(fit.scale, scale, places=14)
-        self.assertEqual(fit.samples, sx.size)
-        self.assertAlmostEqual(fit.positive_projection_fraction, 1.0)
-        np.testing.assert_allclose(
-            vector_residuals(sx, sy, tx, ty, fit.scale),
-            0.0,
-            atol=1e-14,
-            rtol=0,
-        )
-
-    def test_signed_fit_recovers_negative_relation(self):
+    def test_signed_vector_negative_scale(self):
         rng = np.random.default_rng(2)
-        sx = rng.normal(size=2000)
-        sy = rng.normal(size=2000)
-        scale = -0.0042
-        tx = scale * sx
-        ty = scale * sy
+        sx = rng.normal(size=1000)
+        sy = rng.normal(size=1000)
+        fit = fit_signed_vector_scale(sx, sy, -0.003*sx, -0.003*sy)
+        self.assertAlmostEqual(fit.scale, -0.003, places=14)
 
-        fit = fit_signed_vector_scale(sx, sy, tx, ty)
-
-        self.assertAlmostEqual(fit.scale, scale, places=14)
-        self.assertAlmostEqual(fit.positive_projection_fraction, 0.0)
+    def test_exact_positive_scalar_scale(self):
+        x = np.linspace(0.01, 1.0, 1000)
+        y = 0.0075 * x
+        fit = fit_positive_scalar_scale(x, y)
+        self.assertAlmostEqual(fit.scale, 0.0075, places=14)
         np.testing.assert_allclose(
-            signed_vector_residuals(sx, sy, tx, ty, fit.scale),
-            0.0,
-            atol=1e-14,
-            rtol=0,
+            scalar_residuals(x, y, fit.scale), 0.0, atol=1e-14, rtol=0
         )
 
-    def test_positive_fit_still_rejects_negative_relation(self):
-        sx = np.ones(100)
-        sy = np.zeros(100)
-        tx = -2 * sx
-        ty = np.zeros(100)
+    def test_scalar_fit_robust_to_outliers(self):
+        rng = np.random.default_rng(5)
+        x = rng.uniform(0.01, 1.0, 4000)
+        y = 0.006 * x
+        idx = rng.choice(len(x), 300, replace=False)
+        y[idx] += rng.uniform(0.03, 0.08, len(idx))
+        fit = fit_positive_scalar_scale(x, y)
+        self.assertAlmostEqual(fit.scale, 0.006, delta=2e-4)
 
-        with self.assertRaisesRegex(ValueError, "Non-positive"):
-            fit_positive_vector_scale(sx, sy, tx, ty)
-
-    def test_signed_fit_robust_with_outliers(self):
-        rng = np.random.default_rng(3)
-        sx = rng.normal(size=4000)
-        sy = rng.normal(size=4000)
-        true_scale = -0.005
-
-        tx = true_scale * sx
-        ty = true_scale * sy
-
-        outliers = rng.choice(len(sx), 300, replace=False)
-        tx[outliers] += rng.normal(0, 0.08, len(outliers))
-        ty[outliers] += rng.normal(0, 0.08, len(outliers))
-
-        fit = fit_signed_vector_scale(sx, sy, tx, ty)
-        self.assertAlmostEqual(fit.scale, true_scale, delta=2e-4)
-
-    def test_weights_shape_checked(self):
-        sx = np.ones((4, 5))
-        sy = np.ones((4, 5))
-        tx = sx.copy()
-        ty = sy.copy()
-
-        with self.assertRaisesRegex(ValueError, "weights"):
-            fit_signed_vector_scale(
-                sx,
-                sy,
-                tx,
-                ty,
-                weights=np.ones(7),
-            )
+    def test_scalar_negative_target_rejected_from_support(self):
+        x = np.ones(100)
+        y = np.ones(100)
+        y[:20] = -1
+        fit = fit_positive_scalar_scale(x, y)
+        self.assertAlmostEqual(fit.scale, 1.0, places=14)
+        self.assertEqual(fit.samples, 80)
 
 
 if __name__ == "__main__":
