@@ -1,0 +1,58 @@
+{
+  "scope": "source initializer and synthetic mathematics only; no learned inference",
+  "initializer_sha256": "6f6f8ba3516cf1749c57e5751e5a02262c64ce8aba5d526f32937312a3f309f5",
+  "secondary_input_unchanged": true,
+  "global_scale_before_after": [
+    10.000000953674316,
+    1.0000009536743164
+  ],
+  "secondary_metric_base_depth_before_after": [
+    300.0,
+    100.0000991821289
+  ],
+  "secondary_decoder_input_max_change": 0.04666668176651001,
+  "invalid_depth_fallback_and_layer1_guards": "PASS",
+  "background_max_abs_inverse_depth_error": {
+    "highpass": 0.012871146192863073,
+    "screened_poisson": 0.07582811861938665,
+    "oracle_surface_constrained": 9.992007221626409e-16
+  },
+  "sampling_phase_probe": [
+    {
+      "native_width": 1,
+      "phases": 20,
+      "peak_min": 0.10000000149011612,
+      "peak_max": 0.9925292730331421,
+      "fully_missed_phases": 8
+    },
+    {
+      "native_width": 2,
+      "phases": 20,
+      "peak_min": 0.10000000149011612,
+      "peak_max": 1.0,
+      "fully_missed_phases": 3
+    },
+    {
+      "native_width": 3,
+      "phases": 20,
+      "peak_min": 0.515063464641571,
+      "peak_max": 1.0,
+      "fully_missed_phases": 0
+    },
+    {
+      "native_width": 4,
+      "phases": 20,
+      "peak_min": 0.9736328125,
+      "peak_max": 1.0,
+      "fully_missed_phases": 0
+    },
+    {
+      "native_width": 5,
+      "phases": 20,
+      "peak_min": 1.0,
+      "peak_max": 1.0,
+      "fully_missed_phases": 0
+    }
+  ],
+  "caveat": "Oracle support and consistent jumps explain near-zero synthetic halo; automatic labels and real-data interval constraints remain unvalidated."
+}

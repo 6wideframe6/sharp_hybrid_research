@@ -1,0 +1,147 @@
+# =============================================================================
+# sharp_hybrid_research
+# Keep source, tests, configs and markdown reports in Git.
+# Keep checkpoints, datasets, generated diagnostics and heavy artifacts local.
+# =============================================================================
+
+# ---- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# ---- Editors / OS ---------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Logs / temporary files -----------------------------------------------
+*.log
+*.tmp
+*.temp
+*.bak
+*.old
+
+# ---- ML checkpoints / model weights ---------------------------------------
+checkpoints/
+weights/
+models/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.engine
+
+# ---- Generated numerical artifacts ----------------------------------------
+results/
+outputs/
+artifacts/
+cache/
+caches/
+runs/
+tmp/
+temp/
+
+*.npy
+*.npz
+*.fl32
+*.bin
+*.pkl
+*.pickle
+*.joblib
+
+# ---- Geometry / scene exports ---------------------------------------------
+*.ply
+*.pcd
+*.obj
+*.stl
+*.glb
+*.gltf
+
+# ---- Generated images / video ---------------------------------------------
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.bmp
+*.tif
+*.tiff
+*.exr
+*.hdr
+*.mp4
+*.mov
+*.avi
+*.mkv
+
+# Allow intentionally curated documentation figures if we add them later.
+!docs/figures/
+!docs/figures/**/*.png
+!docs/figures/**/*.jpg
+!docs/figures/**/*.jpeg
+!docs/figures/**/*.webp
+
+# ---- Generated K3/K4/K5 run manifests -------------------------------------
+released_checkpoint_gate.json
+preservation.json
+k4_artifact_verification.json
+
+# Generic diagnostic/run dumps
+*_stdout.txt
+*_dump.txt
+*_diagnostic_dump.txt
+
+# ---- Packaging / build ----------------------------------------------------
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ---- Jupyter --------------------------------------------------------------
+.ipynb_checkpoints/
+
+# ---- Optional local scratch ------------------------------------------------
+scratch/
+local/
+_private/
+
+# =============================================================================
+# Intentionally TRACKED examples:
+#
+#   *.py
+#   tests/**/*.py
+#   README.md
+#   REPORT.md
+#   PROGRESS.md
+#   K3.md
+#   K4.md
+#   ARCHITECTURE.md
+#   configs/**/*.json
+#   configs/**/*.yaml
+#   configs/**/*.toml
+#
+# If a generated artifact is truly worth keeping, place a compact version under
+# docs/evidence/ or docs/figures/ and force-add it explicitly.
+# =============================================================================
