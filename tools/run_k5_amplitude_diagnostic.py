@@ -3,16 +3,24 @@
 
 This script DOES NOT modify SHARP depth and DOES NOT integrate a correction.
 
-It estimates whether one bounded global scalar can map the K5-A.1
+It estimates whether one positive global scalar can map the K5-A.1
 dimensionless detail-vector template into SHARP inverse-depth gradient units
 on trusted non-wire shared geometry.
 
+IMPORTANT:
+K4 ``anchor_candidates`` are intentionally NOT used here. K4 anchor masks were
+constructed from smooth fitting interiors and explicitly excluded RGB/depth
+boundaries. Reusing them for K5-B would contradict the requirement that K5-B
+fit on shared high-frequency geometry.
+
 Training support:
-- intersection of K4 anchor-candidate masks from both TinyViM contexts;
+- finite positive SHARP inverse depth in both overlapping contexts;
+- finite K5 direction/detail/confidence;
 - outside the known wire proxy + exclusion dilation;
-- sufficiently strong SHARP high-frequency gradient;
+- image border excluded;
 - sufficiently strong K5 final confidence;
-- image-border excluded.
+- then retain the requested percentile of strongest SHARP high-frequency
+  gradient within that support.
 
 Validation:
 - spatial block cross-fit;
@@ -47,17 +55,7 @@ def load_report(folder):
 def load_context_array(folder, name, box):
     value = np.load(folder / name)
     if value.shape != box.shape:
-        raise ValueError(f"{folder/name}: {value.shape} != native box {box.shape}")
-    return value
-
-
-def load_candidate(folder, box):
-    path = folder / "anchor_candidates.png"
-    if not path.exists():
-        raise FileNotFoundError(f"Required K4 anchor candidates not found: {path}")
-    value = np.asarray(Image.open(path).convert("L")) > 0
-    if value.shape != box.shape:
-        raise ValueError(f"{path}: shape mismatch")
+        raise ValueError(f"{folder / name}: {value.shape} != native box {box.shape}")
     return value
 
 
@@ -124,6 +122,10 @@ def cosine_stats(sx, sy, tx, ty):
     }
 
 
+def count(mask):
+    return int(np.count_nonzero(mask))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--context-a", type=Path, required=True)
@@ -152,13 +154,25 @@ def main():
         raise FileExistsError(f"Refusing to overwrite {output}")
     if args.coarse_sigma <= args.fine_sigma:
         raise ValueError("coarse_sigma must be greater than fine_sigma")
+    if not 0.0 <= args.sharp_detail_percentile < 100.0:
+        raise ValueError("sharp_detail_percentile must be in [0, 100)")
+    if args.min_k5_confidence < 0:
+        raise ValueError("min_k5_confidence must be non-negative")
+    if args.wire_exclusion_px < 0 or args.border_px < 0:
+        raise ValueError("wire_exclusion_px and border_px must be non-negative")
+    if args.block_size <= 0:
+        raise ValueError("block_size must be positive")
     if args.folds < 2:
         raise ValueError("folds must be >= 2")
 
     report_a = load_report(context_a)
     report_b = load_report(context_b)
-    box_a = NativeBox.from_sequence(report_a["provenance"]["box_native_half_open"])
-    box_b = NativeBox.from_sequence(report_b["provenance"]["box_native_half_open"])
+    box_a = NativeBox.from_sequence(
+        report_a["provenance"]["box_native_half_open"]
+    )
+    box_b = NativeBox.from_sequence(
+        report_b["provenance"]["box_native_half_open"]
+    )
     common = box_a.intersect(box_b)
 
     k5_summary = json.loads((k5_root / "summary.json").read_text())
@@ -184,11 +198,10 @@ def main():
         if value.shape != common.shape:
             raise ValueError(f"{name}: {value.shape} != {common.shape}")
 
-    # Dimensionless K5 template: detail strength controls relative spatial
-    # amplitude; direction comes from context consensus. Confidence is used only
-    # as fitting weight / support gate, not multiplied into the template here.
+    # Dimensionless K5 template. TinyViM/K5 amplitude is NOT considered metric.
     source_x = detail * direction_x
     source_y = detail * direction_y
+    source_mag = np.hypot(source_x, source_y)
 
     q_a_full = load_context_array(
         context_a, "sharp_visible_inverse_m.npy", box_a
@@ -199,7 +212,12 @@ def main():
     q_a = crop_to_native_box(q_a_full, box_a, common)
     q_b = crop_to_native_box(q_b_full, box_b, common)
 
-    finite_q = np.isfinite(q_a) & np.isfinite(q_b) & (q_a > 0) & (q_b > 0)
+    finite_q = (
+        np.isfinite(q_a)
+        & np.isfinite(q_b)
+        & (q_a > 0)
+        & (q_b > 0)
+    )
     q_diff = np.abs(q_a - q_b)
     q = 0.5 * (q_a + q_b)
 
@@ -210,16 +228,25 @@ def main():
     )
     sharp_mag = np.hypot(sharp_x, sharp_y)
 
-    cand_a_full = load_candidate(context_a, box_a)
-    cand_b_full = load_candidate(context_b, box_b)
-    cand_a = crop_to_native_box(cand_a_full, box_a, common)
-    cand_b = crop_to_native_box(cand_b_full, box_b, common)
-    candidates = cand_a & cand_b
+    finite_k5 = (
+        np.isfinite(source_x)
+        & np.isfinite(source_y)
+        & np.isfinite(source_mag)
+        & np.isfinite(confidence)
+    )
+    finite_sharp_detail = (
+        np.isfinite(sharp_x)
+        & np.isfinite(sharp_y)
+        & np.isfinite(sharp_mag)
+    )
 
     wire = map_wire_proxy(wire_crop, common)
-    wire_excluded = ndi.binary_dilation(
-        wire, iterations=args.wire_exclusion_px
-    )
+    if args.wire_exclusion_px > 0:
+        wire_excluded = ndi.binary_dilation(
+            wire, iterations=args.wire_exclusion_px
+        )
+    else:
+        wire_excluded = wire.copy()
 
     border = np.ones(common.shape, dtype=bool)
     b = args.border_px
@@ -229,20 +256,33 @@ def main():
         border[:, :b] = False
         border[:, -b:] = False
 
-    base = (
-        candidates
-        & finite_q
-        & np.isfinite(sharp_mag)
-        & np.isfinite(source_x)
-        & np.isfinite(source_y)
-        & np.isfinite(confidence)
-        & (~wire_excluded)
-        & border
-        & (confidence >= args.min_k5_confidence)
-    )
+    # Build support cumulatively and keep every stage visible in diagnostics.
+    support0 = finite_q
+    support1 = support0 & finite_sharp_detail
+    support2 = support1 & finite_k5
+    support3 = support2 & (~wire_excluded)
+    support4 = support3 & border
+    base = support4 & (confidence >= args.min_k5_confidence)
 
-    if int(base.sum()) < 100:
-        raise RuntimeError(f"Only {int(base.sum())} base shared-detail samples")
+    support_stages = {
+        "overlap_pixels": int(common.height * common.width),
+        "finite_positive_sharp_both_contexts": count(support0),
+        "plus_finite_sharp_detail": count(support1),
+        "plus_finite_k5": count(support2),
+        "plus_wire_exclusion": count(support3),
+        "plus_border": count(support4),
+        "plus_min_k5_confidence": count(base),
+    }
+
+    print("K5-B.1 support stages:")
+    for key, value in support_stages.items():
+        print(f"  {key}: {value}")
+
+    if count(base) < 100:
+        raise RuntimeError(
+            "Insufficient base shared-detail support after corrected K5-B filters: "
+            f"{count(base)} pixels. See support stages above."
+        )
 
     sharp_threshold = float(
         np.percentile(
@@ -251,6 +291,17 @@ def main():
         )
     )
     selected = base & (sharp_mag >= sharp_threshold)
+
+    print(
+        f"  plus_sharp_detail_percentile_{args.sharp_detail_percentile:g}: "
+        f"{count(selected)}"
+    )
+
+    if count(selected) < 100:
+        raise RuntimeError(
+            f"Only {count(selected)} selected SHARP-detail pixels after "
+            f"percentile {args.sharp_detail_percentile:g}"
+        )
 
     yy, xx = np.mgrid[:common.height, :common.width]
     ncols = int(np.ceil(common.width / args.block_size))
@@ -283,13 +334,13 @@ def main():
         val = selected & np.isin(block_map, validation_blocks)
         train = selected & (~np.isin(block_map, validation_blocks))
 
-        if int(train.sum()) < 50 or int(val.sum()) < 20:
+        if count(train) < 50 or count(val) < 20:
             folds.append({
                 "fold": fold_id,
                 "usable": False,
                 "reason": "insufficient train/validation samples",
-                "training_samples": int(train.sum()),
-                "validation_samples": int(val.sum()),
+                "training_samples": count(train),
+                "validation_samples": count(val),
             })
             continue
 
@@ -318,29 +369,42 @@ def main():
         )
         target_mag = sharp_mag[val]
         ratio_mask = target_mag > np.finfo(float).tiny
-        magnitude_ratio = pred_mag[ratio_mask] / target_mag[ratio_mask]
+        magnitude_ratio = (
+            pred_mag[ratio_mask] / target_mag[ratio_mask]
+        )
 
         folds.append({
             "fold": fold_id,
             "usable": True,
-            "training_samples": int(train.sum()),
-            "validation_samples": int(val.sum()),
+            "training_samples": count(train),
+            "validation_samples": count(val),
             "scale": float(fit.scale),
             "fit_iterations": int(fit.iterations),
             "positive_projection_fraction_train": (
                 fit.positive_projection_fraction
             ),
             "normalized_vector_residual": stats(normalized),
-            "magnitude_ratio_predicted_over_sharp": stats(magnitude_ratio),
+            "magnitude_ratio_predicted_over_sharp": stats(
+                magnitude_ratio
+            ),
             "validation_direction_cosine": cosine_stats(
-                source_x[val], source_y[val], sharp_x[val], sharp_y[val]
+                source_x[val],
+                source_y[val],
+                sharp_x[val],
+                sharp_y[val],
             ),
         })
+
+    if not fold_scales:
+        raise RuntimeError("No usable cross-validation folds")
 
     if len(fold_scales) >= 2:
         scale_variation = float(
             np.ptp(fold_scales)
-            / max(np.median(fold_scales), np.finfo(float).tiny)
+            / max(
+                float(np.median(fold_scales)),
+                np.finfo(float).tiny,
+            )
         )
     else:
         scale_variation = None
@@ -355,23 +419,29 @@ def main():
 
     wire_valid = (
         wire
-        & np.isfinite(source_x)
-        & np.isfinite(source_y)
-        & np.isfinite(confidence)
+        & finite_k5
     )
     wire_template_mag = np.hypot(
-        source_x[wire_valid], source_y[wire_valid]
+        source_x[wire_valid],
+        source_y[wire_valid],
     )
-    wire_predicted_metric_mag = full_fit.scale * wire_template_mag
+    wire_predicted_metric_mag = (
+        full_fit.scale * wire_template_mag
+    )
 
     trusted_sharp_mag = sharp_mag[selected]
 
     output.mkdir(parents=True, exist_ok=False)
+    np.save(output / "base_support_mask.npy", base)
     np.save(output / "training_support_mask.npy", selected)
     np.save(output / "sharp_detail_magnitude.npy", sharp_mag)
 
     summary = {
         "purpose": "K5-B.1 diagnostic global metric amplitude scale only",
+        "support_design_revision": (
+            "K4 anchor candidates removed: they intentionally exclude depth/RGB "
+            "boundaries and are incompatible with high-frequency amplitude fitting."
+        ),
         "context_a": str(context_a),
         "context_b": str(context_b),
         "k5_output": str(k5_root),
@@ -390,16 +460,20 @@ def main():
             "block_size": args.block_size,
             "folds": args.folds,
         },
+        "support_stages": {
+            **support_stages,
+            "selected_after_sharp_detail_percentile": count(selected),
+            "spatial_blocks": int(len(blocks)),
+            "wire_pixels": count(wire),
+            "wire_excluded_pixels": count(wire_excluded),
+        },
         "sharp_overlap_consistency": {
-            "finite_pixels": int(finite_q.sum()),
+            "finite_pixels": count(finite_q),
             "abs_difference_1_per_m": stats(q_diff[finite_q]),
         },
-        "support": {
-            "candidate_intersection_pixels": int(candidates.sum()),
-            "base_shared_detail_pixels": int(base.sum()),
-            "selected_training_support_pixels": int(selected.sum()),
-            "spatial_blocks": int(len(blocks)),
-            "wire_pixels": int(wire.sum()),
+        "k5_template_on_base": {
+            "magnitude": stats(source_mag[base]),
+            "confidence": stats(confidence[base]),
         },
         "crossfit": {
             "folds": folds,
@@ -410,7 +484,9 @@ def main():
             "pooled_normalized_vector_residual": stats(
                 np.asarray(pooled_residuals)
             ),
-            "normalization_sharp_detail_p90_1_per_m_per_px": target_scale,
+            "normalization_sharp_detail_p90_1_per_m_per_px": (
+                target_scale
+            ),
         },
         "full_fit": {
             "scale_1_per_m_per_template_unit": float(full_fit.scale),
@@ -434,6 +510,7 @@ def main():
             ),
         },
         "guardrails": [
+            "K4 anchor masks are not used in K5-B amplitude fitting.",
             "Wire pixels are excluded from amplitude fitting.",
             "No depth correction is integrated.",
             "No SHARP depth/Gaussians/PLY are modified.",
